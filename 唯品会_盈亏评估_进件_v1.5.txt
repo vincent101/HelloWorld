@@ -1,0 +1,142 @@
+----------授信渠道过滤
+create table hive_temp_jrisk.tmp_ql_wf_00 as 
+select a.uid, substring(a.shouxin_date,0,7) as shouxin_date, c.total_credit_line 
+from vipjrd.st_pcl_shouxin_channel as a
+left join temp_jrd.hsh_shouxin_channel as b on a.uid=b.uid
+left join vipjrd.dm_p01_pcl_shouxin as c on a.uid=c.uid and c.dt=get_dt_date(get_date(-1)) 
+where a.dt=get_dt_date(get_date(-1)) 
+and a.shouxin_date>='2016-09-01' and  b.channel_mar_def='前隆新户' and c.total_credit_line>0;
+
+----------消费记录
+create table hive_temp_jrisk.tmp_ql_wf_01_1 as 
+select uid, 
+sum(changed_amount) as changed_amount,
+count(changed_amount) as changed_cnt,
+max(substring(trade_time,0,7)) as bill_month
+from vipjrd.dm_p04_pcl_trade_consume
+where dt=get_dt_date(get_date(-1))
+and operate_type in ('01','15','20','21')
+group by uid, bill_month;
+
+----------订单分期记录
+create table hive_temp_jrisk.tmp_ql_wf_02 as 
+select uid, transaction_id, 
+max(period_num) as pay_period_num, 
+max(order_amount) as pay_period_amt,
+max(substring(period_create_time,0,7)) as bill_month
+from vipjrd.dw_pcl_vipshop_pay_period
+where dt=get_dt_date(get_date(-1)) 
+group by uid, transaction_id
+union all
+select uid, transaction_id, 
+max(period_num) as pay_period_num, 
+max(order_amount/100) as pay_period_amt,
+max(substring(period_create_time,0,7)) as bill_month
+from vipjrd.dw_pcl_vipshop_xfd_period_bill				
+where dt=get_dt_date(get_date(-1)) and period_type in (15,21,49)
+group by uid, transaction_id;
+
+create table hive_temp_jrisk.tmp_ql_wf_02_1 as
+select uid, bill_month,
+count(transaction_id) as pay_period_cnt, 
+sum(pay_period_amt) as pay_period_amt, 
+avg(pay_period_num) as pay_period_stage_num
+from hive_temp_jrisk.tmp_ql_wf_02 
+group by uid, bill_month;
+
+----------账单分期记录
+create table hive_temp_jrisk.tmp_ql_wf_03 as 
+select uid, transaction_id, 
+max(total_period) as bill_period_num, 
+max(total_period)*max(period_amount) as bill_period_amt,
+max(substring(period_create_time,0,7)) as bill_month
+from vipjrd.dw_pcl_vipshop_bill_period
+where dt=get_dt_date(get_date(-1))
+group by uid, transaction_id
+union all
+select uid, transaction_id, 
+max(total_period) as bill_period_num, 
+max(total_period)*max(period_amount) as bill_period_amt,
+max(substring(period_create_time,0,7)) as bill_month
+from vipjrd.dw_pcl_vipshop_xfd_period_bill		
+where dt=get_dt_date(get_date(-1)) and period_type=13
+group by uid, transaction_id;
+
+create table hive_temp_jrisk.tmp_ql_wf_03_1 as 
+select uid, bill_month 
+count(transaction_id) as bill_period_cnt, 
+sum(bill_period_amt) as bill_period_amt, 
+avg(bill_period_num) as bill_period_stage_num
+from hive_temp_jrisk.tmp_ql_wf_03
+group by uid, bill_month;
+
+----------退货记录
+create table hive_temp_jrisk.tmp_ql_wf_201705_04_1 as 
+select uid,
+sum(changed_amount) as ret_amt,
+count(changed_amount) as ret_cnt, 
+max(substring(trade_time,0,7)) as bill_month
+from vipjrd.dw_pcl_vipshop_trade_log
+where dt=get_dt_date(get_date(-1)) 
+and success_flag=0 and is_deleted=0 and operate_type in ('02','22')
+group by uid, bill_month;
+
+----------宽表
+create table hive_temp_jrisk.tmp_ql_wf_05 as 
+select a.uid, a.shouxin_date, b.bill_month, 
+	a.total_credit_line, b.changed_amount,
+	c.pay_period_cnt, c.pay_period_amt, c.pay_stage_num,
+	d.bill_period_cnt, d.bill_period_amt, d.bill_stage_num,
+	e.ret_cnt, e.ret_amt
+from 
+	hive_temp_jrisk.tmp_ql_wf_00 as a
+left join  
+	hive_temp_jrisk.tmp_ql_wf_01_1 as b on a.uid=b.uid
+left join 
+	hive_temp_jrisk.tmp_ql_wf_02_1 as c on a.uid=c.uid and b.bill_month=c.bill_month
+left join 
+	hive_temp_jrisk.tmp_ql_wf_03_1 as d on a.uid=d.uid and b.bill_month=d.bill_month
+left join 
+	hive_temp_jrisk.tmp_ql_wf_04_1 as e on a.uid=e.uid and b.bill_month=e.bill_month
+;
+
+----------统计
+select 
+	shouxin_date,
+	bill_month,
+	count(total_credit_line) as pass_pers,
+	
+	sum(changed_amount) as consume_amt,
+	sum(charged_cnt) as consume_cnt,
+	count(changed_amount) as consume_pers,
+	
+	sum(pay_period_amt) as pay_period_amt,
+	sum(pay_period_cnt) as pay_period_cnt,
+	count(pay_period_amt) as pay_period_pers,
+	avg(pay_period_stage_num) as pay_period_stage_num_avg,
+	
+	sum(bill_period_amt) as bill_period_amt,
+	sum(bill_period_cnt) as bill_period_cnt,
+	count(bill_period_amt) as bill_period_pers,
+	avg(bill_period_stage_num) as bill_period_stage_num_avg,
+	
+	sum(ret_cnt) as ret_cnt,
+	sum(ret_amt) as ret_amt
+from 
+	hive_temp_jrisk.tmp_ql_wf_201705_05
+group by shouxin_date, bill_month;
+
+----------删除临时表1
+drop table hive_temp_jrisk.tmp_ql_wf_201705_01;
+drop table hive_temp_jrisk.tmp_ql_wf_201705_02;
+drop table hive_temp_jrisk.tmp_ql_wf_201705_02_1;
+drop table hive_temp_jrisk.tmp_ql_wf_201705_03;
+drop table hive_temp_jrisk.tmp_ql_wf_201705_03_1;
+drop table hive_temp_jrisk.tmp_ql_wf_201705_04;
+drop table hive_temp_jrisk.tmp_ql_wf_201705_05;
+
+----------删除临时表2
+drop table hive_temp_jrisk.tmp_ql_wf_00;
+
+
+
